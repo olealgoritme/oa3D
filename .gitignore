@@ -1,0 +1,12 @@
+.gitmodules
+.idea/
+.git/
+tags
+tags.lock
+tags.temp
+build/
+Build/
+debug/
+Debug/
+cmake-build-debug/
+.ccls-cache/

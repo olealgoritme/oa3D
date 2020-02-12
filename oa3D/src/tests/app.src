@@ -1,0 +1,445 @@
+// Local OA 3D Engine Headers
+
+#include "OA3D.h"
+#include "GLFW_Input.h" // GLFW Input callbacks
+#include "Shader.h"
+#include "Mesh.h"
+
+#include "glm/glm.hpp"
+
+//#include "texture.h"
+#include "RendererGL.h"
+#include "ModelCamera.h"
+#include "Model.h"
+#include "GUILoader.h"
+
+// Vendor specific
+/*
+ *#include "imgui.h"
+ *#include "imgui_impl_glfw.h"
+ *#include "imgui_impl_opengl3.h"
+ */
+
+// System Headers
+#include "glad/glad.h"
+#include "GLFW/glfw3.h"
+
+// Standard Headers
+#include <cstdio>
+#include <cstdlib>
+
+// OA3D
+Renderer *renderer;
+GUILoader gui;
+
+// GLFW Keys
+int newState = 0;
+int oldState = 0;
+
+// GLFW
+GLFWcursor *cursor;
+GLFWwindow *window;
+
+// camera
+ModelCamera camera(glm::vec3(0.0f, 0.0f, 3.0f));
+float lastX = mWidth / 2.0f;
+float lastY = mHeight / 2.0f;
+bool firstMouse = true;
+bool orbitCamera = true;
+
+// FPS / time
+float currentFrame;
+float lastFrame;
+float deltaTime; // between current and last frame
+int numFrames = 0;
+
+
+// TODO: translate to mat4 matrices in 3D space
+// instance translations
+bool INSTANCED = false;
+glm::vec3 translations[100];
+
+// Vertex position/color array (vertex has start point and direction - imagine an arrow)
+float quadVertices[] = {
+    // positions
+        -.05,  .05,
+         .05, -.05,
+        -.05, -.05,
+
+        -.05,  .05,
+         .05,  .05,
+         .05, -.05,
+};
+
+// Indexes in GPU array (to form quad)
+unsigned int indices[] = {
+        0, 1, 2,
+        2, 3, 0
+};
+
+
+
+void instance_setup() {
+    // this is merely just a translation table thats fed to the shader
+        int index = 0;
+        float offset = 0.3f;
+
+        for (int y = -10; y < 10; y += 2)
+        {
+            for (int x = -10; x < 10; x += 2)
+            {
+                glm::vec3 translation;
+                translation.x = x / 10. + offset * 2.0;
+                translation.y = y / 10. + offset * 1.0;
+                translation.z = x / 10. + offset * 1.5;;
+                translations[index++] = translation;
+            }
+        }
+
+        // store instance data in vbo
+        unsigned int instanceVBO;
+
+        glGenBuffers(1, &instanceVBO);
+        glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(glm::vec3) * 100, &translations[0], GL_STATIC_DRAW );
+
+        // set instance data
+        glBindVertexArray(1); // hoping it's at index 1
+
+        glEnableVertexAttribArray(5);
+        glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+        glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *) 0);
+        glVertexAttribDivisor(5, 1);
+
+        // done
+        glBindVertexArray(0);
+}
+
+
+// create cursor
+void init_cursor(GLFWwindow* window)
+{
+    // Creating a 8x8 pixel cursor from an arbitrary image
+    // The image data is 32-bit, little-endian, non-premultiplied RGBA, i.e. eight bits per channel with the red channel first.
+    // The pixels are arranged canonically as sequential rows, starting from the top-left corner.
+
+    unsigned char pixels[8 * 8 * 4]; // 8 pixels by 8 pixels by 4 channels (RGBA - Red/Green/Blue/Alpha)
+    memset(pixels, 0xff, sizeof(pixels));
+
+    GLFWimage image;
+    image.width = 8;
+    image.height = 8;
+    image.pixels = pixels;
+
+    cursor = glfwCreateCursor(&image, 0, 0);
+    glfwSetCursor(window, cursor);
+}
+
+// initialize glfw options
+void init_glfw()
+{
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+
+    glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
+    glfwWindowHint(GLFW_SAMPLES, 16); // 16 x AA
+    glfwWindowHint(GLFW_DOUBLEBUFFER, GL_TRUE);
+    glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GL_TRUE);
+//    glfwWindowHint(GLFW_DECORATED, GL_FALSE);
+
+}
+
+// updates the standard mouse/time/res vectors for use in shaders
+void update_transforms(Shader shader)
+{
+    // iMouse
+    double xpos, ypos;
+    glfwGetCursorPos(window, &xpos, &ypos);
+    shader.setVec2("iMouse", (float) xpos, (float) ypos);
+
+    // iTime
+    float now = glfwGetTime();
+    shader.setFloat("iTime", (float) now);
+
+    // iResolution
+    shader.setVec3("iResolution", (float) mWidth, (float) mHeight, 1.0f); // viewport resolution (in pixels)
+}
+
+// lights
+void update_light_transforms(Shader shader)
+{
+    // adds a phong light the nanosuit model
+    // see model_loading_fragment.glsl file for setup
+
+    shader.setVec3("lightPos", glm::vec3(0.3, 0.5, -2.0));
+    shader.setVec3("viewPos", camera.Position);
+}
+
+// updates transform matrix for mvp
+void update_projection_transforms(Shader shader)
+{
+
+    shader.use();
+    // view/projection transformations
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)mWidth / (float) mHeight, 0.1f, 100.0f);
+    shader.setMat4("projection", projection);
+
+    glm::mat4 view = camera.GetViewMatrix();
+    shader.setMat4("view", view);
+
+    // render the loaded model
+    glm::mat4 model = glm::mat4(1.0f);
+    model = glm::translate(model, glm::vec3(0.0f, -1.75f, 0.0f)); // translate it down so it's at the center of the scene
+    model = glm::scale(model, glm::vec3(0.2f, 0.2f, 0.2f));	// it's a bit too big for our scene, so scale it down
+    shader.setMat4("model", model);
+
+
+    if (INSTANCED)
+    {
+        // instanced_loading_vertex.glsl: layout (location = 3) in vec2 aInstanceOffset;
+        srand(time(NULL));
+        int randIndex = rand() % 100;
+        shader.setVec2("aInstanceOffset", translations[randIndex]);
+    }
+
+    update_transforms(shader);
+    update_light_transforms(shader);
+}
+
+
+int main() {
+
+    init_glfw();
+    window = glfwCreateWindow(mWidth, mHeight, "OA3D OpenGL 3D Rendering Engine", nullptr, nullptr);
+
+    if (window == nullptr) {
+        printf("Failed to Create OpenGL Context");
+        return EXIT_FAILURE;
+    }
+
+    // set glfw as current opengl context
+    glfwMakeContextCurrent(window);
+
+    // set callbacks
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+    glfwSetCursorPosCallback(window, mouse_cursorPos_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+
+    // GLAD loading OpenGL functions
+    gladLoadGL();
+
+    printf("OA3D OpenGL 3D Rendering Engine, OpenGL version %s\n", glGetString(GL_VERSION));
+    printf("Written by Ole Algoritme (C) 2020\n");
+
+    // tell GLFW to capture our mouse
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+
+    // Initialize cursor in window
+    init_cursor(window);
+
+    // OpenGL Option settings
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+
+
+    //glEnable(GL_BLEND);
+    //glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+    //glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    //glEnable(GL_CULL_FACE);
+    //glCullFace(GL_BACK);
+    //glFrontFace(GL_CCW);
+
+    // Vsync off
+    // glfwSwapInterval(0);
+
+    // Instanced opengl testing
+    //if(INSTANCED) instance_setup();
+
+    // FPS
+    float lastFrame = glfwGetTime();
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(.3, .3, .3, 1.0);
+
+    // Shaders
+    Shader suitShader = Shader("../../oa3D/shaders/model_load_vert.glsl",
+                               "../../oa3D/shaders/model_load_frag.glsl");
+
+    Shader lightShader = Shader("../../oa3D/shaders/simple_light_vert.glsl",
+                                "../../oa3D/shaders/simple_light_frag.glsl");
+
+    // 3D Models
+    Model suitModel("../../oa3D/assets/nanosuit/nanosuit.obj");
+    Model lampModel("../../oa3D/assets/lamp/sconce_03.obj");
+
+    // Connect models to shaders
+    suitModel.setShader(suitShader);
+    lampModel.setShader(lightShader);
+
+
+    // Get our OA3D Engine renderer
+    renderer = renderer->getInstance();
+
+    // Set viewport
+    glViewport(0, 0, mWidth, mHeight);
+
+    // Init imgui
+    gui = GUILoader();
+    gui.init(window);
+
+
+
+    // Main render loop
+    while (!glfwWindowShouldClose(window)) {
+
+        // Clear color and depth buffer
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // Frame counter
+        numFrames++;
+
+        // Timing
+        currentFrame = glfwGetTime();
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
+        // process mouse/keyboard input events
+        processInput(window);
+
+        // Update Shader transforms
+        update_transforms(suitShader);
+        update_light_transforms(suitShader);
+        
+        // Renderer draws models
+        renderer->drawModel(suitModel);
+        renderer->drawModel(lampModel);
+
+        // draw gui
+        gui.render();
+
+        // Flip Buffers and Draw
+        glfwSwapBuffers(window);
+
+        // Poll window system for events
+        glfwPollEvents();
+    }
+}
+
+void cleanup()
+{
+    // GLFW Window close
+    glfwSetWindowShouldClose(window, true);
+
+    // Destroy cursor
+    glfwDestroyCursor(cursor);
+
+    // Destroy window
+    glfwDestroyWindow(window);
+
+    // Terminate glfw bindings
+    glfwTerminate();
+
+    // Unbind VAO
+    glBindVertexArray(0);
+
+}
+// ---------------------------------------------------------------------------------------------------------
+void processInput(GLFWwindow *window)
+{
+
+    // Exit
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        cleanup();
+
+    // Quit
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+        cleanup();
+
+    // Space (press AND release)
+    newState = glfwGetKey(window, GLFW_KEY_SPACE);
+    if (newState == GLFW_RELEASE && oldState == GLFW_PRESS)
+    {
+        if(orbitCamera)
+        {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            orbitCamera = false;
+            camera.ToggleCamera();
+        }
+        else
+        {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            orbitCamera = true;
+            camera.ToggleCamera();
+        }
+
+    }
+    oldState = newState;
+
+    // Forward
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        camera.ProcessKeyboard(FORWARD, deltaTime);
+
+    // Backward
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        camera.ProcessKeyboard(BACKWARD, deltaTime);
+
+    // Left
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        camera.ProcessKeyboard(LEFT, deltaTime);
+
+    // Right
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        camera.ProcessKeyboard(RIGHT, deltaTime);
+}
+
+void framebuffer_size_callback(GLFWwindow* window, int width, int height)
+{
+    (void) window;
+    glViewport(0, 0, width, height);
+}
+
+void mouse_cursorPos_callback(GLFWwindow* window, double xpos, double ypos)
+{
+    (void) window;
+
+    if (firstMouse)
+    {
+        lastX = xpos;
+        lastY = ypos;
+        firstMouse = false;
+    }
+
+    float xoffset = xpos - lastX;
+    float yoffset = lastY - ypos; // reversed since y-coordinates go from bottom to top
+
+    lastX = xpos;
+    lastY = ypos;
+
+    camera.ProcessMouseMovement(xoffset, yoffset);
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
+{
+   (void) mods;
+
+   if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS )
+    {
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        //Shader *shader = static_cast<Shader*>(shaderPtr);
+        camera.ProcessMouseLeftPress((float) (xpos - lastX), (float) (lastY - ypos), deltaTime);
+    }
+}
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    (void) window;
+    (void) xoffset;
+    camera.ProcessMouseScroll(yoffset);
+}
+
+
