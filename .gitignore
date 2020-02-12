@@ -1,6 +1,8 @@
 .gitmodules
 .idea/
 .git/
+hooks/
+info/
 tags
 tags.lock
 tags.temp
