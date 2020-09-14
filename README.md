@@ -1,4 +1,4 @@
-## OA3D - An OpenGL 3D Rendering Engine - in the making
+## OA3D - An OpenGL 3D Rendering Engine - in the making (when I got more time...)
 ---
 - [x] GLFW/OpenGL/GLad Setup
 - [x] Shader Manager class
